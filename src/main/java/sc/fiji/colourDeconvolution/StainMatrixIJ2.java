@@ -1,11 +1,24 @@
 package sc.fiji.colourDeconvolution;
 
 import net.imagej.ImgPlus;
+import net.imagej.ops.create.img.Imgs;
+import net.imglib2.IterableInterval;
 import net.imglib2.RandomAccess;
+import net.imglib2.RandomAccessibleInterval;
+import net.imglib2.converter.ColorChannelOrder;
+import net.imglib2.converter.Converters;
 import net.imglib2.display.ColorTable8;
 import net.imglib2.img.Img;
 import net.imglib2.img.array.ArrayImgs;
+import net.imglib2.loops.LoopBuilder;
+import net.imglib2.type.numeric.ARGBType;
 import net.imglib2.type.numeric.integer.UnsignedByteType;
+import net.imglib2.view.IntervalView;
+import net.imglib2.view.Views;
+import net.imglib2.view.composite.CompositeIntervalView;
+import net.imglib2.view.composite.CompositeView;
+import net.imglib2.view.composite.GenericComposite;
+import net.imglib2.view.composite.NumericComposite;
 
 public class StainMatrixIJ2 extends StainMatrixBase {
     /**
@@ -20,33 +33,34 @@ public class StainMatrixIJ2 extends StainMatrixBase {
     public ImgPlus<UnsignedByteType>[] compute(ImgPlus<UnsignedByteType> imp) {
         double[] q = initComputation(true);
 
+        // TODO For the algorithm, we don't actually need an ImgPlus but only an Img
         Img<UnsignedByteType> img = imp.getImg();
 
         int width = (int) img.dimension(0);
         int height = (int) img.dimension(1);
 
         double log255 = Math.log(255.0);
-
-        RandomAccess<UnsignedByteType> randomAccess = img.randomAccess();
-
-        byte[][] newpixels = new byte[3][];
-        newpixels[0] = new byte[width * height];
-        newpixels[1] = new byte[width * height];
-        newpixels[2] = new byte[width * height];
-
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int R = randomAccess.get().getInteger();
-                randomAccess.fwd(2);
-                int G = randomAccess.get().getInteger();
-                randomAccess.fwd(2);
-                int B = randomAccess.get().getInteger();
-                randomAccess.move(-2, 2);
-
-                double Rlog = -((255.0 * Math.log(((double) R + 1) / 255.0)) / log255);
+        
+        // Convert img to a composite
+        RandomAccessibleInterval<NumericComposite<UnsignedByteType>> collapseNumeric = Views.collapseNumeric(img);
+        RandomAccessibleInterval<ARGBType> mergeARGB = Converters.mergeARGB(img, ColorChannelOrder.RGB);
+        
+        // Create output image of same type
+        Img<UnsignedByteType> outputImg = img.factory().create(img);
+        RandomAccessibleInterval<ARGBType> outputRAI = Converters.mergeARGB(outputImg, ColorChannelOrder.RGB);
+                
+        LoopBuilder.setImages(mergeARGB, outputRAI).forEachPixel(
+        	(i, o) -> {
+        		int rgba = i.get();
+        		int R = ARGBType.red(rgba);
+        		int G = ARGBType.green(rgba);
+        		int B = ARGBType.blue(rgba);
+        		
+        		double Rlog = -((255.0 * Math.log(((double) R + 1) / 255.0)) / log255);
                 double Glog = -((255.0 * Math.log(((double) G + 1) / 255.0)) / log255);
                 double Blog = -((255.0 * Math.log(((double) B + 1) / 255.0)) / log255);
-
+                
+                int[] channels = new int[3];
                 for (int channel = 0; channel < 3; channel++) {
                     // Rescale to match original paper values
                     double Rscaled = Rlog * q[channel * 3];
@@ -54,17 +68,23 @@ public class StainMatrixIJ2 extends StainMatrixBase {
                     double Bscaled = Blog * q[channel * 3 + 2];
                     double output = Math.exp(-((Rscaled + Gscaled + Bscaled) - 255.0) * log255 / 255.0);
                     if (output > 255) output = 255;
-                    newpixels[channel][width * y + x] = (byte) (0xff & (int) (Math.floor(output + .5)));
-                }
-                randomAccess.fwd(0);
-            }
-            randomAccess.move(-width, 0);
-            randomAccess.fwd(1);
-        }
 
+                    // TODO Check conversion is correct
+                    channels[channel] = (int) (Math.floor(output + .5));
+                }
+                
+                o.set(ARGBType.rgba(channels[0], channels[1], channels[2], 0));
+        	}
+        );
+        
+        // Convert outputRAI from composite to multichannel image
+        RandomAccessibleInterval<UnsignedByteType> argbChannels = Converters.argbChannels(outputRAI);
+        RandomAccessibleInterval<UnsignedByteType> hyperSlice = Views.hyperSlice(argbChannels, 2, 0);
+        
+        // TODO Optimize below
         @SuppressWarnings("unchecked")
         ImgPlus<UnsignedByteType>[] outputImages = new ImgPlus[3];
-        outputImages[0] = new ImgPlus<>(ArrayImgs.unsignedBytes(newpixels[0], width, height));
+        outputImages[0] = new ImgPlus<>((RandomAccessibleInterval<UnsignedByteType>) Views.hyperSlice(argbChannels, 2, 0));
         outputImages[1] = new ImgPlus<>(ArrayImgs.unsignedBytes(newpixels[1], width, height));
         outputImages[2] = new ImgPlus<>(ArrayImgs.unsignedBytes(newpixels[2], width, height));
         initializeColorTables(outputImages);
